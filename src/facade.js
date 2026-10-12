@@ -467,17 +467,19 @@ if ( typeof ENVIRONMENT_IS_PTHREAD === 'undefined' || !ENVIRONMENT_IS_PTHREAD )
 	// Resolve the static scratch once — the address is stable — and strip the getter
 	// from the public module (it's internal plumbing). --post-js runs after embind has
 	// registered, so the raw fns are already on Module here.
-	const SCRATCH = Module.b3_getMathScratch(); // byte pointer to the static float scratch
-	const SCRATCH_F32 = SCRATCH >>> 2; //          element base into HEAPF32
+	// The scratch holds doubles (so a large-world b3Pos reads back losslessly; floats
+	// widen exactly), 8-byte aligned.
+	const SCRATCH = Module.b3_getMathScratch(); // byte pointer to the static double scratch
+	const SCRATCH_F64 = SCRATCH >>> 3; //          element base into HEAPF64
 	delete Module.b3_getMathScratch;
 
-	// Live-heap accessor in factory scope: HEAPF32 is a module-scope var that memory
+	// Live-heap accessor in factory scope: HEAPF64 is a module-scope var that memory
 	// growth may reassign, so the generated readers call this each time rather than
 	// closing over a stale view. (The readers are built with `new Function`, whose body
-	// runs in global scope and so cannot see the bare `HEAPF32` directly.)
-	const getF32 = () => HEAPF32;
+	// runs in global scope and so cannot see the bare `HEAPF64` directly.)
+	const getF64 = () => HEAPF64;
 
-	// Build a reader from one _outMeta entry. `sizes` is the float count of each out
+	// Build a reader from one _outMeta entry. `sizes` is the value count of each out
 	// slot; `trailing` the number of forwarded input args. Returns the single out for a
 	// one-out getter, or [out0, out1, ...] for a multi-out one (a transform reads as
 	// position + rotation). The copy is codegen'd unrolled per slot with literal scratch
@@ -490,21 +492,21 @@ if ( typeof ENVIRONMENT_IS_PTHREAD === 'undefined' || !ENVIRONMENT_IS_PTHREAD )
 
 		// scratch byte pointer per out slot (slots are laid out contiguously)
 		let byteOff = 0;
-		const slotPtrs = sizes.map( ( n ) => { const p = SCRATCH + byteOff; byteOff += n * 4; return p; } );
+		const slotPtrs = sizes.map( ( n ) => { const p = SCRATCH + byteOff; byteOff += n * 8; return p; } );
 		const intoArgs = [ ...slotPtrs, ...trail ].join( ', ' );
 
 		let elemOff = 0;
 		const copy = sizes.map( ( n, i ) =>
 		{
-			const base = SCRATCH_F32 + elemOff; elemOff += n;
+			const base = SCRATCH_F64 + elemOff; elemOff += n;
 			let body = '';
 			for ( let k = 0; k < n; k++ ) body += `out${i}[${k}]=h[${base + k}];`;
 			return body;
 		} ).join( '' );
 
 		const ret = outs.length === 1 ? outs[ 0 ] : `[ ${outs.join( ', ' )} ]`;
-		return new Function( 'raw', 'getF32',
-			`return function(${params}){raw(${intoArgs});const h=getF32();${copy}return ${ret};};` )( rawInto, getF32 );
+		return new Function( 'raw', 'getF64',
+			`return function(${params}){raw(${intoArgs});const h=getF64();${copy}return ${ret};};` )( rawInto, getF64 );
 	};
 
 	// Install a public reader per binding-site entry; capture + strip the raw `*Into`.

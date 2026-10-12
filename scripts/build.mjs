@@ -22,6 +22,10 @@ import { dirname, join, resolve } from 'node:path';
 
 const root = resolve( dirname( fileURLToPath( import.meta.url ) ), '..' );
 const debug = process.argv.includes( '--debug' );
+// Large world mode: box3d's world positions (b3Pos, b3WorldTransform) become double precision.
+// The define must reach both the static lib and the bindings so their headers agree; box3d's
+// link-time guard fails the link if they don't.
+const doublePrecision = process.argv.includes( '--double' );
 
 // box3d clamps workerCount to [1, B3_MAX_WORKERS] (=32). The Emscripten pthread
 // pool must be >= the max threads the scheduler can spawn or it deadlocks
@@ -157,6 +161,7 @@ function buildBox3dLib( buildDir, cflags )
 		'-DBOX3D_BENCHMARKS=OFF',
 		'-DBOX3D_DOCS=OFF',
 		'-DBOX3D_VALIDATE=OFF',
+		'-DBOX3D_DOUBLE_PRECISION=' + ( doublePrecision ? 'ON' : 'OFF' ),
 	];
 	if ( cflags ) args.push( '-DCMAKE_C_FLAGS=' + cflags );
 	run( 'emcmake', args );
@@ -180,6 +185,7 @@ console.log( 'box3d MT lib:', mtLib );
 // Flags common to every link (bindings source + engine lib are prepended per build).
 const commonFlags = [
 	'-I', 'vendor/box3d/include',
+	...( doublePrecision ? [ '-DBOX3D_DOUBLE_PRECISION' ] : [] ),
 	'-std=c++17',
 	'-lembind',
 	// NB: the facade post-js (build/facade.generated.js) is NOT here — it is codegen'd

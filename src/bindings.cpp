@@ -56,23 +56,32 @@ using namespace emscripten;
 namespace
 {
 // --- out-param math reads (see conventions in the file header) ---
-// A static float scratch the facade points the raw `*Into` writers at, then copies
-// out into the caller's array. 16 floats covers the largest math read (a transform).
-float g_mathScratch[16];
+// A static scratch the facade points the raw `*Into` writers at, then copies out
+// into the caller's array. 16 slots covers the largest math read (a transform).
+// Slots are doubles so a world position (b3Pos) reads back losslessly in a
+// BOX3D_DOUBLE_PRECISION build; float values widen exactly, so a float build
+// reads the same numbers it always did.
+alignas( 8 ) double g_mathScratch[16];
 
 inline void writeVec3( uintptr_t out, b3Vec3 v )
 {
-	float* o = reinterpret_cast<float*>( out );
+	double* o = reinterpret_cast<double*>( out );
 	o[0] = v.x; o[1] = v.y; o[2] = v.z;
+}
+// A world position: three doubles in large world mode, b3Vec3 otherwise.
+inline void writePos( uintptr_t out, b3Pos p )
+{
+	double* o = reinterpret_cast<double*>( out );
+	o[0] = p.x; o[1] = p.y; o[2] = p.z;
 }
 inline void writeQuat( uintptr_t out, b3Quat q )
 {
-	float* o = reinterpret_cast<float*>( out );
+	double* o = reinterpret_cast<double*>( out );
 	o[0] = q.v.x; o[1] = q.v.y; o[2] = q.v.z; o[3] = q.s;
 }
 inline void writeAABB( uintptr_t out, b3AABB a )
 {
-	float* o = reinterpret_cast<float*>( out );
+	double* o = reinterpret_cast<double*>( out );
 	o[0] = a.lowerBound.x; o[1] = a.lowerBound.y; o[2] = a.lowerBound.z;
 	o[3] = a.upperBound.x; o[4] = a.upperBound.y; o[5] = a.upperBound.z;
 }
@@ -108,6 +117,8 @@ std::vector<OutEntry> g_outRegistry;
 namespace out_desc
 {
 struct Vec3Tag { static constexpr const char* tsType = "b3Vec3"; static constexpr int size = 3; };
+// A world position (written by writePos). Same [x,y,z] shape in JS in either precision mode.
+struct PosTag { static constexpr const char* tsType = "b3Vec3"; static constexpr int size = 3; };
 struct QuatTag { static constexpr const char* tsType = "b3Quat"; static constexpr int size = 4; };
 struct AABBTag { static constexpr const char* tsType = "b3AABB"; static constexpr int size = 6; };
 
@@ -115,6 +126,7 @@ template<typename Tag> struct out_t {};
 struct pass_t {};
 inline constexpr pass_t Pass{};       // a forwarded (non-out) input arg
 inline constexpr out_t<Vec3Tag> Vec3{};
+inline constexpr out_t<PosTag> Pos{};
 inline constexpr out_t<QuatTag> Quat{};
 inline constexpr out_t<AABBTag> AABB{};
 
@@ -612,6 +624,19 @@ EMSCRIPTEN_BINDINGS( box3d )
 		.field( "position", &b3Transform::p )
 		.field( "quaternion", &b3Transform::q );
 
+#if defined( BOX3D_DOUBLE_PRECISION )
+	// Large world mode: world positions and transforms are their own types, with double
+	// translation. Same JS shapes as b3Vec3 / b3Transform. (In float mode they are
+	// typedefs of those and already registered.)
+	value_array<b3Pos>( "b3Pos" )
+		.element( &b3Pos::x )
+		.element( &b3Pos::y )
+		.element( &b3Pos::z );
+	value_object<b3WorldTransform>( "b3WorldTransform" )
+		.field( "position", &b3WorldTransform::p )
+		.field( "quaternion", &b3WorldTransform::q );
+#endif
+
 	value_object<b3Plane>( "b3Plane" )
 		.field( "normal", &b3Plane::normal )
 		.field( "offset", &b3Plane::offset );
@@ -831,11 +856,11 @@ EMSCRIPTEN_BINDINGS( box3d )
 	function( "b3DestroyBody(bodyId)", &b3DestroyBody );
 	function( "b3Body_IsValid(id)", &b3Body_IsValid );
 	function( "b3Body_GetType(bodyId)", &b3Body_GetType );
-	out_function( "b3Body_GetPosition(out, bodyId)", out_desc::Vec3, out_desc::Pass, +[]( uintptr_t out, b3BodyId id ) { writeVec3( out, b3Body_GetPosition( id ) ); } );
+	out_function( "b3Body_GetPosition(out, bodyId)", out_desc::Pos, out_desc::Pass, +[]( uintptr_t out, b3BodyId id ) { writePos( out, b3Body_GetPosition( id ) ); } );
 	out_function( "b3Body_GetRotation(out, bodyId)", out_desc::Quat, out_desc::Pass, +[]( uintptr_t out, b3BodyId id ) { writeQuat( out, b3Body_GetRotation( id ) ); } );
 	// Transform reads as two out params — position (Vec3) then rotation (Quat).
-	out_function( "b3Body_GetTransform(outPosition, outRotation, bodyId)", out_desc::Vec3, out_desc::Quat, out_desc::Pass,
-		+[]( uintptr_t outPos, uintptr_t outRot, b3BodyId id ) { b3Transform t = b3Body_GetTransform( id ); writeVec3( outPos, t.p ); writeQuat( outRot, t.q ); } );
+	out_function( "b3Body_GetTransform(outPosition, outRotation, bodyId)", out_desc::Pos, out_desc::Quat, out_desc::Pass,
+		+[]( uintptr_t outPos, uintptr_t outRot, b3BodyId id ) { b3WorldTransform t = b3Body_GetTransform( id ); writePos( outPos, t.p ); writeQuat( outRot, t.q ); } );
 	function( "b3Body_SetTransform(bodyId, position, rotation)", &b3Body_SetTransform );
 	out_function( "b3Body_GetLinearVelocity(out, bodyId)", out_desc::Vec3, out_desc::Pass, +[]( uintptr_t out, b3BodyId id ) { writeVec3( out, b3Body_GetLinearVelocity( id ) ); } );
 	out_function( "b3Body_GetAngularVelocity(out, bodyId)", out_desc::Vec3, out_desc::Pass, +[]( uintptr_t out, b3BodyId id ) { writeVec3( out, b3Body_GetAngularVelocity( id ) ); } );
@@ -1003,14 +1028,14 @@ EMSCRIPTEN_BINDINGS( box3d )
 		.field( "plane", &b3PlaneResult::plane )
 		.field( "point", &b3PlaneResult::point );
 	function( "b3World_CastMover(worldId, origin, mover, translation, filter, callback)",
-		+[]( b3WorldId worldId, b3Vec3 origin, b3Capsule mover, b3Vec3 translation, b3QueryFilter filter, val cb ) -> float
+		+[]( b3WorldId worldId, b3Pos origin, b3Capsule mover, b3Vec3 translation, b3QueryFilter filter, val cb ) -> float
 		{
 			return b3World_CastMover( worldId, origin, &mover, translation, filter,
 				[]( b3ShapeId shapeId, void* ctx ) -> bool
 				{ val r = ( *static_cast<val*>( ctx ) )( shapeId ); return r.isUndefined() ? true : r.as<bool>(); },
 				&cb );
 		} );
-	function( "b3World_CollideMover(worldId, origin, mover, filter, callback)", +[]( b3WorldId worldId, b3Vec3 origin, b3Capsule mover, b3QueryFilter filter, val cb )
+	function( "b3World_CollideMover(worldId, origin, mover, filter, callback)", +[]( b3WorldId worldId, b3Pos origin, b3Capsule mover, b3QueryFilter filter, val cb )
 	{
 		b3World_CollideMover( worldId, origin, &mover, filter,
 			[]( b3ShapeId shapeId, const b3PlaneResult* planes, int planeCount, void* ctx ) -> bool
@@ -1115,7 +1140,19 @@ EMSCRIPTEN_BINDINGS( box3d )
 		.field( "iterations", &b3DistanceOutput::iterations )
 		.field( "simplexCount", &b3DistanceOutput::simplexCount );
 
-	// b3CastOutput === b3WorldCastOutput in float mode (already registered).
+	// b3CastOutput === b3WorldCastOutput in float mode (already registered). In large world
+	// mode they differ (the world one has a b3Pos point), so the shape-local one needs its own.
+#if defined( BOX3D_DOUBLE_PRECISION )
+	value_object<b3CastOutput>( "b3CastOutput" )
+		.field( "normal", &b3CastOutput::normal )
+		.field( "point", &b3CastOutput::point )
+		.field( "fraction", &b3CastOutput::fraction )
+		.field( "iterations", &b3CastOutput::iterations )
+		.field( "triangleIndex", &b3CastOutput::triangleIndex )
+		.field( "childIndex", &b3CastOutput::childIndex )
+		.field( "materialIndex", &b3CastOutput::materialIndex )
+		.field( "hit", &b3CastOutput::hit );
+#endif
 
 	value_object<b3Sweep>( "b3Sweep" )
 		.field( "localCenter", &b3Sweep::localCenter )
@@ -1323,7 +1360,7 @@ EMSCRIPTEN_BINDINGS( box3d )
 	function( "b3World_Explode(worldId, explosionDef)", +[]( b3WorldId worldId, b3ExplosionDef def ) { b3World_Explode( worldId, &def ); } );
 
 	function( "b3World_OverlapShape(worldId, origin, points, radius, filter, callback)",
-		+[]( b3WorldId worldId, b3Vec3 origin, val points, float radius, b3QueryFilter filter, val cb )
+		+[]( b3WorldId worldId, b3Pos origin, val points, float radius, b3QueryFilter filter, val cb )
 		{
 			std::vector<float> f = convertJSArrayToNumberVector<float>( points );
 			b3ShapeProxy proxy{ reinterpret_cast<const b3Vec3*>( f.data() ), (int)( f.size() / 3 ), radius };
@@ -1336,7 +1373,7 @@ EMSCRIPTEN_BINDINGS( box3d )
 				&cb );
 		} );
 	function( "b3World_CastShape(worldId, origin, points, radius, translation, filter, callback)",
-		+[]( b3WorldId worldId, b3Vec3 origin, val points, float radius, b3Vec3 translation, b3QueryFilter filter, val cb )
+		+[]( b3WorldId worldId, b3Pos origin, val points, float radius, b3Vec3 translation, b3QueryFilter filter, val cb )
 		{
 			std::vector<float> f = convertJSArrayToNumberVector<float>( points );
 			b3ShapeProxy proxy{ reinterpret_cast<const b3Vec3*>( f.data() ), (int)( f.size() / 3 ), radius };
@@ -1357,15 +1394,15 @@ EMSCRIPTEN_BINDINGS( box3d )
 		.field( "triangleIndex", &b3BodyCastResult::triangleIndex )
 		.field( "iterations", &b3BodyCastResult::iterations )
 		.field( "hit", &b3BodyCastResult::hit );
-	function( "b3Body_CastRay(bodyId, origin, translation, filter, maxFraction, bodyTransform)", +[]( b3BodyId bodyId, b3Vec3 origin, b3Vec3 translation, b3QueryFilter filter, float maxFraction, b3Transform bodyTransform ) -> b3BodyCastResult
+	function( "b3Body_CastRay(bodyId, origin, translation, filter, maxFraction, bodyTransform)", +[]( b3BodyId bodyId, b3Pos origin, b3Vec3 translation, b3QueryFilter filter, float maxFraction, b3WorldTransform bodyTransform ) -> b3BodyCastResult
 	{ return b3Body_CastRay( bodyId, origin, translation, filter, maxFraction, bodyTransform ); } );
-	function( "b3Body_CastShape(bodyId, origin, points, radius, translation, filter, maxFraction, canEncroach, bodyTransform)", +[]( b3BodyId bodyId, b3Vec3 origin, val points, float radius, b3Vec3 translation, b3QueryFilter filter, float maxFraction, bool canEncroach, b3Transform bodyTransform ) -> b3BodyCastResult
+	function( "b3Body_CastShape(bodyId, origin, points, radius, translation, filter, maxFraction, canEncroach, bodyTransform)", +[]( b3BodyId bodyId, b3Pos origin, val points, float radius, b3Vec3 translation, b3QueryFilter filter, float maxFraction, bool canEncroach, b3WorldTransform bodyTransform ) -> b3BodyCastResult
 	{
 		std::vector<float> f = convertJSArrayToNumberVector<float>( points );
 		b3ShapeProxy proxy{ reinterpret_cast<const b3Vec3*>( f.data() ), (int)( f.size() / 3 ), radius };
 		return b3Body_CastShape( bodyId, origin, &proxy, translation, filter, maxFraction, canEncroach, bodyTransform );
 	} );
-	function( "b3Body_OverlapShape(bodyId, origin, points, radius, filter, bodyTransform)", +[]( b3BodyId bodyId, b3Vec3 origin, val points, float radius, b3QueryFilter filter, b3Transform bodyTransform ) -> bool
+	function( "b3Body_OverlapShape(bodyId, origin, points, radius, filter, bodyTransform)", +[]( b3BodyId bodyId, b3Pos origin, val points, float radius, b3QueryFilter filter, b3WorldTransform bodyTransform ) -> bool
 	{
 		std::vector<float> f = convertJSArrayToNumberVector<float>( points );
 		b3ShapeProxy proxy{ reinterpret_cast<const b3Vec3*>( f.data() ), (int)( f.size() / 3 ), radius };
@@ -1379,8 +1416,8 @@ EMSCRIPTEN_BINDINGS( box3d )
 	function( "b3Body_SetName(bodyId, name)", +[]( b3BodyId bodyId, std::string name ) { b3Body_SetName( bodyId, name.c_str() ); } );
 	function( "b3Body_GetName(bodyId)", +[]( b3BodyId bodyId ) { const char* n = b3Body_GetName( bodyId ); return std::string( n ? n : "" ); } );
 
-	out_function( "b3Body_GetLocalPoint(out, bodyId, worldPoint)", out_desc::Vec3, out_desc::Pass, out_desc::Pass, +[]( uintptr_t out, b3BodyId bodyId, b3Vec3 worldPoint ) { writeVec3( out, b3Body_GetLocalPoint( bodyId, worldPoint ) ); } );
-	out_function( "b3Body_GetWorldPoint(out, bodyId, localPoint)", out_desc::Vec3, out_desc::Pass, out_desc::Pass, +[]( uintptr_t out, b3BodyId bodyId, b3Vec3 localPoint ) { writeVec3( out, b3Body_GetWorldPoint( bodyId, localPoint ) ); } );
+	out_function( "b3Body_GetLocalPoint(out, bodyId, worldPoint)", out_desc::Vec3, out_desc::Pass, out_desc::Pass, +[]( uintptr_t out, b3BodyId bodyId, b3Pos worldPoint ) { writeVec3( out, b3Body_GetLocalPoint( bodyId, worldPoint ) ); } );
+	out_function( "b3Body_GetWorldPoint(out, bodyId, localPoint)", out_desc::Pos, out_desc::Pass, out_desc::Pass, +[]( uintptr_t out, b3BodyId bodyId, b3Vec3 localPoint ) { writePos( out, b3Body_GetWorldPoint( bodyId, localPoint ) ); } );
 	out_function( "b3Body_GetLocalVector(out, bodyId, worldVector)", out_desc::Vec3, out_desc::Pass, out_desc::Pass, +[]( uintptr_t out, b3BodyId bodyId, b3Vec3 worldVector ) { writeVec3( out, b3Body_GetLocalVector( bodyId, worldVector ) ); } );
 	out_function( "b3Body_GetWorldVector(out, bodyId, localVector)", out_desc::Vec3, out_desc::Pass, out_desc::Pass, +[]( uintptr_t out, b3BodyId bodyId, b3Vec3 localVector ) { writeVec3( out, b3Body_GetWorldVector( bodyId, localVector ) ); } );
 
@@ -1388,7 +1425,7 @@ EMSCRIPTEN_BINDINGS( box3d )
 	function( "b3Body_SetAngularVelocity(bodyId, angularVelocity)", &b3Body_SetAngularVelocity );
 	function( "b3Body_SetTargetTransform(bodyId, target, timeStep, wake)", &b3Body_SetTargetTransform );
 	out_function( "b3Body_GetLocalPointVelocity(out, bodyId, localPoint)", out_desc::Vec3, out_desc::Pass, out_desc::Pass, +[]( uintptr_t out, b3BodyId bodyId, b3Vec3 localPoint ) { writeVec3( out, b3Body_GetLocalPointVelocity( bodyId, localPoint ) ); } );
-	out_function( "b3Body_GetWorldPointVelocity(out, bodyId, worldPoint)", out_desc::Vec3, out_desc::Pass, out_desc::Pass, +[]( uintptr_t out, b3BodyId bodyId, b3Vec3 worldPoint ) { writeVec3( out, b3Body_GetWorldPointVelocity( bodyId, worldPoint ) ); } );
+	out_function( "b3Body_GetWorldPointVelocity(out, bodyId, worldPoint)", out_desc::Vec3, out_desc::Pass, out_desc::Pass, +[]( uintptr_t out, b3BodyId bodyId, b3Pos worldPoint ) { writeVec3( out, b3Body_GetWorldPointVelocity( bodyId, worldPoint ) ); } );
 
 	function( "b3Body_ApplyForce(bodyId, force, point, wake)", &b3Body_ApplyForce );
 	function( "b3Body_ApplyForceToCenter(bodyId, force, wake)", &b3Body_ApplyForceToCenter );
@@ -1400,7 +1437,7 @@ EMSCRIPTEN_BINDINGS( box3d )
 	function( "b3Body_GetMass(bodyId)", &b3Body_GetMass );
 	function( "b3Body_GetInverseMass(bodyId)", &b3Body_GetInverseMass );
 	out_function( "b3Body_GetLocalCenterOfMass(out, bodyId)", out_desc::Vec3, out_desc::Pass, +[]( uintptr_t out, b3BodyId bodyId ) { writeVec3( out, b3Body_GetLocalCenterOfMass( bodyId ) ); } );
-	out_function( "b3Body_GetWorldCenterOfMass(out, bodyId)", out_desc::Vec3, out_desc::Pass, +[]( uintptr_t out, b3BodyId bodyId ) { writeVec3( out, b3Body_GetWorldCenterOfMass( bodyId ) ); } );
+	out_function( "b3Body_GetWorldCenterOfMass(out, bodyId)", out_desc::Pos, out_desc::Pass, +[]( uintptr_t out, b3BodyId bodyId ) { writePos( out, b3Body_GetWorldCenterOfMass( bodyId ) ); } );
 	function( "b3Body_ApplyMassFromShapes(bodyId)", &b3Body_ApplyMassFromShapes );
 
 	function( "b3Body_SetLinearDamping(bodyId, linearDamping)", &b3Body_SetLinearDamping );
@@ -1893,7 +1930,7 @@ EMSCRIPTEN_BINDINGS( box3d )
 			},
 			&cb );
 	} );
-	function( "b3World_CastRay(worldId, origin, translation, filter, callback)", +[]( b3WorldId worldId, b3Vec3 origin, b3Vec3 translation, b3QueryFilter filter, val cb )
+	function( "b3World_CastRay(worldId, origin, translation, filter, callback)", +[]( b3WorldId worldId, b3Pos origin, b3Vec3 translation, b3QueryFilter filter, val cb )
 	{
 		b3World_CastRay( worldId, origin, translation, filter,
 			[]( b3ShapeId shapeId, b3Pos point, b3Vec3 normal, float fraction, uint64_t, int, int, void* ctx ) -> float
